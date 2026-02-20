@@ -4,18 +4,42 @@ from jose import jwt
 from passlib.context import CryptContext
 from app.core.config import settings
 
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+# Support verifying both bcrypt and argon2 password hashes to remain compatible
+# with existing databases. Prefer bcrypt for new hashes.
+pwd_context = CryptContext(schemes=["bcrypt", "argon2"], deprecated="auto")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plaintext password against the stored hash.
+    Tries the configured CryptContext first; if that fails and argon2-cffi is
+    available, fall back to argon2 verification to support legacy hashes.
+    """
     try:
-        return pwd_context.verify(plain_password, hashed_password)
+        if pwd_context.verify(plain_password, hashed_password):
+            return True
     except Exception:
-        # If verification fails for any reason, return False
+        # Fall through to any fallback checks below
+        pass
+
+    # Fallback: try argon2 directly if available (covers environments where
+    # passlib couldn't verify but argon2-cffi is installed).
+    try:
+        from argon2 import PasswordHasher
+
+        ph = PasswordHasher()
+        try:
+            ph.verify(hashed_password, plain_password)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        # argon2 not available or verification failed
         return False
 
 
 def get_password_hash(password: str) -> str:
+    # Hash new passwords with the preferred scheme (bcrypt)
     return pwd_context.hash(password)
 
 

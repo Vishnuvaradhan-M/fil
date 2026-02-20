@@ -8,6 +8,7 @@ python-dotenv
 python-jose[cryptography]
 passlib[bcrypt]
 bcrypt==3.2.2
+argon2-cffi
 scikit-learn
 pandas
 python-multipart
