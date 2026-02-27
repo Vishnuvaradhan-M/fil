@@ -13,3 +13,8 @@ scikit-learn
 pandas
 python-multipart
 joblib
+chromadb
+sentence-transformers
+groq
+pypdf
+torch

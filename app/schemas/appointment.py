@@ -17,12 +17,15 @@ class AppointmentBase(BaseModel):
     appointment_date: date
     start_time: time
     end_time: time
-
-    patient_name: constr(max_length=120)
-    patient_phone: constr(max_length=20)
+    # Patient details: allow optional submission (frontend may supply), defaults applied server-side
+    patient_name: Optional[constr(max_length=120)] = None
+    patient_phone: Optional[constr(max_length=20)] = None
     patient_email: Optional[EmailStr] = None
-    patient_gender: PatientGender
-    patient_age: PositiveInt
+    patient_gender: Optional[PatientGender] = None
+    patient_age: Optional[PositiveInt] = None
+
+    # Optional room linkage (frontend may provide)
+    room_id: Optional[int] = None
 
     appointment_type: AppointmentType
     reason_for_visit: constr(max_length=255)
@@ -59,6 +62,8 @@ class AppointmentInDBBase(AppointmentBase):
     status: AppointmentStatus
     created_at: datetime
     updated_at: datetime
+    # Augmented field for responses
+    room_name: Optional[str] = None
 
     class Config:
         from_attributes = True

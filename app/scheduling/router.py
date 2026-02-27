@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.core import deps
 from app.core.conflict_detection import validate_doctor_availability
 from app.models.appointment import Appointment, AppointmentStatus, DoctorAvailability
@@ -23,15 +24,36 @@ def create_appointment(
     """
     Create new appointment (Admin or Doctor only).
     """
-    is_available = validate_doctor_availability(
-        db,
-        appointment_in.doctor_id,
-        appointment_in.appointment_date,
-        appointment_in.start_time,
-        appointment_in.end_time,
-    )
-    if not is_available:
-        raise HTTPException(status_code=400, detail="Doctor is not available at the requested time.")
+    # Fill missing patient details with safe defaults if frontend did not provide them
+    data = appointment_in.model_dump()
+    if not data.get("patient_name"):
+        data["patient_name"] = "Unknown"
+    if not data.get("patient_phone"):
+        data["patient_phone"] = ""
+    if not data.get("patient_age"):
+        data["patient_age"] = 0
+    if not data.get("patient_gender"):
+        data["patient_gender"] = "Other"
+    # Fill missing appointment fields with defaults
+    if not data.get("appointment_type"):
+        data["appointment_type"] = schemas.AppointmentType.CONSULTATION.value
+    if not data.get("reason_for_visit"):
+        data["reason_for_visit"] = "Not provided"
+
+    # Rebuild appointment_in from data to include defaults
+    appointment_in = schemas.AppointmentCreate(**data)
+
+    # Enforce availability only for non-admin users; admins may schedule regardless.
+    if current_user.role != UserRole.ADMIN:
+        is_available = validate_doctor_availability(
+            db,
+            appointment_in.doctor_id,
+            appointment_in.appointment_date,
+            appointment_in.start_time,
+            appointment_in.end_time,
+        )
+        if not is_available:
+            raise HTTPException(status_code=400, detail="Doctor is not available at the requested time.")
 
     # Prevent non-admins from booking in the past (IST)
     today_ist = datetime.now(ZoneInfo("Asia/Kolkata")).date()
@@ -41,7 +63,11 @@ def create_appointment(
     ):
         raise HTTPException(status_code=400, detail="Appointment date cannot be in the past.")
 
-    appointment = Appointment(**appointment_in.model_dump())
+    # Only include room_id if the appointments table has the column defined
+    data = appointment_in.model_dump()
+    if "room_id" not in Appointment.__table__.columns:
+        data.pop("room_id", None)
+    appointment = Appointment(**data)
     db.add(appointment)
     db.commit()
     db.refresh(appointment)
@@ -59,15 +85,99 @@ def read_appointments(
     Retrieve appointments.
     Admin/HR/Staff see all. Doctor sees own. Others get 403.
     """
-    if current_user.role == UserRole.ADMIN or current_user.role == UserRole.HR or current_user.role == UserRole.STAFF:
-        appointments = db.query(Appointment).offset(skip).limit(limit).all()
-    elif current_user.role == UserRole.DOCTOR:
-        appointments = db.query(Appointment).filter(
-            Appointment.doctor_id == current_user.id
-        ).offset(skip).limit(limit).all()
-    else:
-        raise HTTPException(status_code=403, detail="Not enough privileges")
-    return appointments
+    # Check if appointments table actually has a room_id column before attempting SQL join
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(db.bind)
+        has_room_id = "room_id" in [c["name"] for c in inspector.get_columns("appointments")]
+    except Exception:
+        has_room_id = False
+
+    try:
+        if has_room_id:
+            # Use raw SQL to fetch appointments with optional room_name if room linkage exists.
+            if current_user.role in {UserRole.ADMIN, UserRole.HR, UserRole.STAFF}:
+                sql = """
+                    SELECT a.*, r.ward_name as room_name
+                    FROM appointments a
+                    LEFT JOIN rooms r ON a.room_id = r.id
+                    ORDER BY a.id
+                    LIMIT :limit OFFSET :skip
+                """
+                rows = db.execute(text(sql), {"limit": limit, "skip": skip}).mappings().all()
+            elif current_user.role == UserRole.DOCTOR:
+                sql = """
+                    SELECT a.*, r.ward_name as room_name
+                    FROM appointments a
+                    LEFT JOIN rooms r ON a.room_id = r.id
+                    WHERE a.doctor_id = :doctor_id
+                    ORDER BY a.id
+                    LIMIT :limit OFFSET :skip
+                """
+                rows = db.execute(text(sql), {"limit": limit, "skip": skip, "doctor_id": current_user.id}).mappings().all()
+            else:
+                raise HTTPException(status_code=403, detail="Not enough privileges")
+            # Map rows to dictionaries and return; response_model will validate
+            result = []
+            for r in rows:
+                d = dict(r)
+                result.append(d)
+            return result
+        # else fall through to ORM-based retrieval
+        if current_user.role not in {UserRole.ADMIN, UserRole.HR, UserRole.STAFF, UserRole.DOCTOR}:
+            raise HTTPException(status_code=403, detail="Not enough privileges")
+
+        # Map rows to dictionaries and return; response_model will validate
+        result = []
+        for r in rows:
+            d = dict(r)
+            # Ensure enums are converted to expected types for Pydantic
+            result.append(d)
+        return result
+    except Exception:
+        # Raw SQL failed (likely schema mismatch such as missing room_id) — rollback and fallback to ORM
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        if current_user.role in {UserRole.ADMIN, UserRole.HR, UserRole.STAFF}:
+            appointments = db.query(Appointment).offset(skip).limit(limit).all()
+        elif current_user.role == UserRole.DOCTOR:
+            appointments = db.query(Appointment).filter(
+                Appointment.doctor_id == current_user.id
+            ).offset(skip).limit(limit).all()
+        else:
+            raise HTTPException(status_code=403, detail="Not enough privileges")
+        # Build response list with optional room_name if available
+        out = []
+        for a in appointments:
+            d = {
+                "id": a.id,
+                "patient_id": a.patient_id,
+                "doctor_id": a.doctor_id,
+                "appointment_date": a.appointment_date,
+                "start_time": a.start_time,
+                "end_time": a.end_time,
+                "patient_name": a.patient_name,
+                "patient_phone": a.patient_phone,
+                "patient_email": a.patient_email,
+                "patient_gender": a.patient_gender,
+                "patient_age": a.patient_age,
+                "appointment_type": a.appointment_type,
+                "status": a.status,
+                "reason_for_visit": a.reason_for_visit,
+                "notes": a.notes,
+                "created_at": a.created_at,
+                "updated_at": a.updated_at,
+                "room_name": None,
+            }
+            try:
+                if hasattr(a, "room") and a.room is not None:
+                    d["room_name"] = getattr(a.room, "ward_name", None)
+            except Exception:
+                d["room_name"] = None
+            out.append(d)
+        return out
 
 
 @router.put("/{appointment_id}", response_model=schemas.Appointment)

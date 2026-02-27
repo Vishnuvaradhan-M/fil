@@ -1,18 +1,20 @@
 from typing import Optional
 from datetime import date, time, datetime
 
-from pydantic import BaseModel, PositiveInt, constr, field_validator
+from pydantic import BaseModel, PositiveInt, constr, field_validator, Field
 
 from app.models.room import RoomType
 # OTSlotStatus, OTBookingStatus are commented out in models
 
 
 class RoomBase(BaseModel):
+    model_config = {"populate_by_name": True}
     room_number: constr(max_length=20)
-    ward_name: constr(max_length=80)
-    room_type: Optional[RoomType] = None
-    bed_capacity: PositiveInt
-    floor_number: int
+    # Provide sensible defaults so frontend minimal forms can create rooms
+    ward_name: constr(max_length=80) = Field("General Ward", alias="name")
+    room_type: Optional[RoomType] = RoomType.GENERAL
+    bed_capacity: PositiveInt = Field(1, alias="capacity")
+    floor_number: int = 1
     is_active: bool = True
 
 

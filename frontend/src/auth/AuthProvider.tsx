@@ -23,18 +23,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     });
     localStorage.setItem("access_token", resp.access_token);
-    // Call an endpoint to fetch current user details
-    const me = await apiFetch("/users/?skip=0&limit=1", { auth: true }).catch(() => null);
-    // Try to set basic info
+    // Call an endpoint to fetch current user details: fetch a list and find the matching email
     localStorage.setItem("user_email", email);
-    if (Array.isArray(me) && me.length > 0) {
-      localStorage.setItem("user_role", me[0].role.toLowerCase());
-      setUser({ email, role: me[0].role.toLowerCase() });
-    } else {
-      // fallback
-      localStorage.setItem("user_role", "staff");
-      setUser({ email, role: "staff" });
+    try {
+      const list = await apiFetch("/users/?skip=0&limit=100", { auth: true }).catch(() => null);
+      if (Array.isArray(list)) {
+        const me = list.find((u: any) => (u.email || "").toLowerCase() === email.toLowerCase());
+        if (me) {
+          localStorage.setItem("user_role", String(me.role).toLowerCase());
+          setUser({ email, role: String(me.role).toLowerCase() });
+          return;
+        }
+      }
+    } catch {
+      // ignore and fallback
     }
+    // fallback: assume staff
+    localStorage.setItem("user_role", "staff");
+    setUser({ email, role: "staff" });
   }
 
   function logout() {

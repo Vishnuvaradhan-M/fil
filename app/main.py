@@ -42,6 +42,9 @@ app.include_router(ml_router.router, prefix=f"{settings.API_V1_STR}/ml", tags=["
 from app.health import router as health_router
 app.include_router(health_router.router, prefix=settings.API_V1_STR, tags=["health"])
 
+from app.rag import api as rag_api
+app.include_router(rag_api.router, prefix=f"{settings.API_V1_STR}", tags=["rag"])
+
 
 @app.get("/")
 def read_root() -> dict[str, str]:

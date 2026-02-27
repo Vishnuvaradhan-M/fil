@@ -20,7 +20,14 @@ export async function apiFetch(path: string, opts: FetchOptions = {}) {
   }
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    // try parse JSON error bodies like {"detail":"..."}
+    try {
+      const parsed = JSON.parse(text);
+      const msg = parsed?.detail || parsed?.message || (typeof parsed === "string" ? parsed : null);
+      throw new Error(msg || text || res.statusText);
+    } catch {
+      throw new Error(text || res.statusText);
+    }
   }
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("application/json")) return res.json();

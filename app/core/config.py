@@ -6,6 +6,8 @@ import os
 # Ensure the backend/.env file is always loaded, regardless of cwd.
 _BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _ENV_PATH = os.path.join(_BASE_DIR, ".env")
+# Load .env into environment but avoid leaking optional subsystem keys (like GROQ_API_KEY)
+# which can cause validation errors in Settings when unknown variables are present.
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 
@@ -23,11 +25,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
-    class Config:
-        case_sensitive = True
-        # env_file kept for compatibility, but load_dotenv above ensures
-        # backend/.env is used even when running modules via -m.
-        env_file = ".env"
+    # Pydantic v2 model config: allow extra env vars so optional subsystem envs don't break startup
+    model_config = {"extra": "ignore", "case_sensitive": True, "env_file": ".env"}
 
 
-settings = Settings()
+# Temporarily remove GROQ_API_KEY from os.environ during core settings instantiation
+_groq_key = os.environ.pop("GROQ_API_KEY", None)
+try:
+    settings = Settings()
+finally:
+    if _groq_key is not None:
+        os.environ["GROQ_API_KEY"] = _groq_key

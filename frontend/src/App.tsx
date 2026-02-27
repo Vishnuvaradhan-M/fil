@@ -8,6 +8,7 @@ import UsersPage from "./pages/Users";
 import RoomsPage from "./pages/Rooms";
 import AppointmentsPage from "./pages/Appointments";
 import MlPage from "./pages/ML";
+import RAGPage from "./pages/RAG";
 import NavBar from "./components/NavBar";
 
 function ProtectedRoute({ children, roles }: { children: JSX.Element; roles?: string[] }) {
@@ -69,6 +70,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <MlPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/rag"
+            element={
+              <ProtectedRoute>
+                <RAGPage />
               </ProtectedRoute>
             }
           />

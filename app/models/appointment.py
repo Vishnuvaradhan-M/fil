@@ -50,6 +50,7 @@ class Appointment(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     doctor = relationship("User", backref="appointments")
+    # room relationship omitted because appointments table may not include room_id column in some environments
 
 
 class DoctorAvailability(Base):

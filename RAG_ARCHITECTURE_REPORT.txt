@@ -1,0 +1,123 @@
+CURRENT RAG ARCHITECTURE REPORT
+
+1. Retriever:
+   - Ingestion:
+     - Files are read into a single text string. PDFs use PyPDF's PdfReader to extract page text; text files are decoded as UTF‑8. See ingest_file_bytes which calls _load_pdf_bytes/_load_txt_bytes and clean_whitespace.
+     - Reference: e:\beer-subbu\app\rag\ingestion.py (ingest_file_bytes)
+
+   - Chunking:
+     - Character-based sliding window chunker (not token-aware). It slices the raw string into fixed-size character windows with overlap. CHUNK_SIZE and CHUNK_OVERLAP are configured in config.py (defaults: 1000 / 200). This is plain substring slicing — headings/structure are not preserved or interpreted, and chunk boundaries can split sentences/sections.
+     - Reference: e:\beer-subbu\app\rag\utils.py (chunk_text) and e:\beer-subbu\app\rag\config.py (CHUNK_SIZE/CHUNK_OVERLAP)
+
+   - Metadata:
+     - Metadata stored per chunk is minimal: {"source": filename}. No headings, section numbers, page numbers, or hierarchy stored.
+     - Reference: e:\beer-subbu\app\rag\ingestion.py (metadata creation)
+
+   - Similarity:
+     - When using ChromaDB: the Chroma client returns distances (collection.query includes distances). These distances are returned as "score" and later converted to similarity by Retriever as 1/(1+distance). For the in-memory fallback, Euclidean distance is computed between embeddings and the query embedding (numpy norm).
+     - Reference: e:\beer-subbu\app\rag\vector_store.py (similarity_search), e:\beer-subbu\app\rag\retriever.py (conversion)
+
+   - Threshold:
+     - A hard similarity threshold is applied: chunks with similarity < RAG_SIMILARITY_THRESHOLD are discarded. If no chunks pass, the pipeline immediately returns "I do not have enough information...". Threshold default is 0.35 (config).
+     - Reference: e:\beer-subbu\app\rag\retriever.py (threshold filtering)
+
+   - Top-K / candidate selection:
+     - The pipeline retrieves a larger candidate pool first: candidate_k = TOP_K * RAG_RERANK_TOP_K_FACTOR (defaults factor 2). Then it filters and trims to requested top_k.
+     - Reference: e:\beer-subbu\app\rag\retriever.py (candidate_k)
+
+   - Re-ranking:
+     - Optional CrossEncoder reranker using sentence-transformers (if RAG_RERANK_ENABLED and RAG_RERANKER_MODEL are set). If present, it scores (query, chunk_text) pairs and sorts by reranker score. If reranker fails, the system continues with similarity sort.
+     - Reference: e:\beer-subbu\app\rag\retriever.py (rerank block)
+
+   - Duplicate handling:
+     - Deduplication is done at ingestion (by exact text) and again in the pipeline after retrieval (removes duplicate texts keeping highest similarity).
+     - Reference: e:\beer-subbu\app\rag\ingestion.py (dedupe) and e:\beer-subbu\app\rag\rag_pipeline.py (dedup)
+
+   - Weaknesses:
+     - Chunking is character-length based (not token- or semantic-aware) so chunks can split sentences and break structure.
+     - Metadata is minimal (only filename) — headings/section ids lost.
+     - Similarity uses euclidean distance / Chroma distances converted to 1/(1+dist) — distances depend on embedding norms; no normalization beyond that.
+     - Hard threshold may remove borderline but useful chunks; no dynamic threshold or query-specific tuning unless config changed.
+     - Reranking is optional and disabled by default — many deployments will skip this stronger cross-encoder ranking.
+
+2. Generator:
+   - Prompt:
+     - Generator builds a strict system prompt that:
+       - Forces the assistant to answer ONLY using provided context.
+       - Demands an exact refusal string if info missing.
+       - Requires inline citations for each factual statement in the format (Source: filename, Chunk: chunk-id).
+       - Forbids fabrication.
+     - Full prompt string is built in Generator._build_prompt.
+     - Reference: e:\beer-subbu\app\rag\generator.py (_build_prompt)
+
+   - Context Handling:
+     - Context is built by RAGPipeline._format_context by concatenating each selected chunk as:
+       "Source: {source}\n{chunk_text}\n" with "---" separators, then truncating if too long. This is raw concatenation with lightweight source labels but no structured section headings or numbered context.
+     - Reference: e:\beer-subbu\app\rag\rag_pipeline.py (_format_context)
+
+   - Prompt behavior: extractive vs summarization
+     - The prompt explicitly forces extractive behavior: "Answer ONLY using the provided context" and requires inline citations for every factual statement. This strongly biases the model toward reproducing verbatim content from the context rather than synthesizing across chunks unless it can confidently cite the source.
+
+   - Structured output:
+     - No enforced structured data format (e.g., JSON). The only structural requirement is inline citations appended to factual statements.
+
+   - Why responses often copy-paste:
+     - Strict instruction to only use context combined with requirement to cite each factual statement encourages verbatim quoting from the context to guarantee support and avoid hallucination.
+     - Context is provided as large contiguous blocks; the model finds matching spans and reproduces them with citation instead of synthesizing.
+
+   - Token limits:
+     - Context is truncated by character limit heuristics (settings.MAX_CONTEXT_TOKENS * 4) — large chunks may cause truncation of other chunks or loss of context, affecting cross-chunk reasoning.
+
+3. Validation / Hallucination Prevention Layer:
+   - Logic flow (retrieval → generation → validation):
+     - Retrieval returns deduped top_k chunks (after threshold). Pipeline formats context and calls the Generator. If generator is unavailable, pipeline falls back to a safe extractive answer. If generator returns text, pipeline verifies generated sentences against retrieved chunks; if verification fails, it rejects generation and constructs an extractive fallback.
+     - Reference: e:\beer-subbu\app\rag\rag_pipeline.py (run)
+
+   - Confidence calculation:
+     - retrieval_conf = max(source score) (simple heuristic based on similarity).
+     - verification_fraction = fraction of generated sentences that have token overlap >= RAG_VERIFICATION_MIN_OVERLAP with retrieved chunks.
+     - final confidence = retrieval_conf * RAG_CONF_RETRIEVAL_WEIGHT + verification_fraction * RAG_CONF_VERIFICATION_WEIGHT.
+     - Reference: e:\beer-subbu\app\rag\rag_pipeline.py (verification and confidence computation)
+
+   - Refusal handling:
+     - If no retrieved chunks above threshold → immediate refusal string ("I do not have enough information...").
+     - If generated answer contains sentences not verified (verification_fraction < 1.0), generation is rejected and an extractive fallback is returned.
+
+   - Weaknesses:
+     - Verification uses naive token overlap (word presence) which can be brittle (synonyms, paraphrase fail).
+     - Using max similarity as retrieval_conf is brittle: one strong chunk can inflate retrieval_conf even if other context lacking.
+     - The hard requirement that verification_fraction == 1.0 for acceptance is strict; partial but correct generative answers get rejected and fallback to small extractive snippets — reduces synthesis capability.
+
+4. Contextual Relationship Modeling:
+   - Current State:
+     - Document structure/hierarchy is not preserved. Only filename stored as metadata, and chunks are character-sliced substrings. No headings or section numbers are extracted/stored.
+     - Context formatting attaches only "Source: filename" before each chunk and concatenates chunks with '---' separators.
+     - Chunks are treated independently; there is no explicit mechanism to indicate chunk order, parent section, or relative position other than their presence in the context string order.
+     - Reference: e:\beer-subbu\app\rag\ingestion.py (metadata) and e:\beer-subbu\app\rag\rag_pipeline.py (_format_context)
+
+   - Limitations:
+     - No section/headings metadata: the system cannot reason about document hierarchy, flow, or dependencies between sections.
+     - Chunk boundaries may split logical statements, causing the generator to see fragmented context.
+     - Cross-chunk relationships (e.g., definitions earlier in doc that are needed to interpret later sections) are not linked; the model has no explicit signal to connect chunks beyond proximity and embedding similarity.
+
+   - Why model fails to connect related sections:
+     - Embedding-based retrieval retrieves semantically similar chunks but may miss distributed evidence spanning low-similarity chunks; large character chunks dilute locality of key facts; verification requires token overlap per sentence, so multi-step cross-chunk reasoning fails verification.
+
+5. Root Cause of Copy-Paste Behavior:
+   - Technical Explanation:
+     - Prompt design enforces extractive behavior:
+       - "Answer ONLY using the provided context" + "add inline citation for each factual statement" -> easiest safe strategy is to copy exact sentences from context and append a citation.
+     - Chunk size & overlap:
+       - Large CHUNK_SIZE (1000 chars) leads to long chunks containing complete sentences/paragraphs. The model can find exact matching spans and reproduce them verbatim.
+     - Verification & fallback logic:
+       - Post-generation verification uses token overlap; to pass, generated sentences must have sufficient token overlap with chunk text. This biases outputs to be close copies of chunk sentences.
+       - If any generated sentence fails verification, generation is rejected and pipeline uses an extractive fallback (top matching sentences). That makes generation risk-averse and incentivizes copying.
+     - Context concatenation:
+       - Raw concatenation without structural markers (e.g., section headings or chunk indices) and with large chunks makes the model more likely to reproduce text it sees verbatim to satisfy the citation demand and to maximize overlap for verification.
+     - Lack of structured output enforcement:
+       - Because no constrained output schema is requested (e.g., "Return 1-2 bullet points with citations"), model can output long paraphrases; but verification will punish paraphrases that don't match tokens, pushing toward verbatim copying.
+
+   - Summary: strict prompt requiring citations + strict verification rules + large raw chunks + simple token-overlap verification together create a strong incentive for verbatim extraction and for extractive fallback — hence copy-paste behavior.
+
+End of report.
+
